@@ -8,6 +8,19 @@
 (define-constant ERR_ALREADY_ALLOCATED (err u106))
 (define-constant ERR_NOT_ELIGIBLE (err u107))
 
+(define-data-var contract-owner principal tx-sender)
+(define-map role-membership
+    {
+        role: (buff 32),
+        account: principal,
+    }
+    { active: bool }
+)
+(define-map role-counts
+    { role: (buff 32) }
+    { count: uint }
+)
+
 (define-data-var next-unit-id uint u1)
 (define-data-var next-application-id uint u1)
 (define-data-var allocation-open bool true)
@@ -60,6 +73,148 @@
 
 (define-read-only (get-contract-owner)
     CONTRACT_OWNER
+)
+
+(define-read-only (get-owner)
+    (var-get contract-owner)
+)
+
+(define-read-only (get-role-count (role (buff 32)))
+    (let (
+            (entry (map-get? role-counts { role: role }))
+            (value (default-to { count: u0 } entry))
+            (count (get count value))
+        )
+        count
+    )
+)
+
+(define-public (has-role
+        (role (buff 32))
+        (account principal)
+    )
+    (let (
+            (entry (map-get? role-membership {
+                role: role,
+                account: account,
+            }))
+            (value (default-to { active: false } entry))
+            (flag (get active value))
+        )
+        (ok flag)
+    )
+)
+
+(define-public (transfer-ownership (new-owner principal))
+    (if (is-eq tx-sender (var-get contract-owner))
+        (begin
+            (var-set contract-owner new-owner)
+            (ok true)
+        )
+        (err u100)
+    )
+)
+
+(define-public (grant-role
+        (role (buff 32))
+        (account principal)
+    )
+    (if (is-eq tx-sender (var-get contract-owner))
+        (let (
+                (current-opt (map-get? role-membership {
+                    role: role,
+                    account: account,
+                }))
+                (current (default-to { active: false } current-opt))
+                (is-active (get active current))
+                (count-opt (map-get? role-counts { role: role }))
+                (count-tuple (default-to { count: u0 } count-opt))
+                (count-val (get count count-tuple))
+            )
+            (if is-active
+                (ok false)
+                (begin
+                    (map-set role-membership {
+                        role: role,
+                        account: account,
+                    } { active: true }
+                    )
+                    (map-set role-counts { role: role } { count: (+ count-val u1) })
+                    (ok true)
+                )
+            )
+        )
+        (err u100)
+    )
+)
+
+(define-public (revoke-role
+        (role (buff 32))
+        (account principal)
+    )
+    (if (is-eq tx-sender (var-get contract-owner))
+        (let (
+                (current-opt (map-get? role-membership {
+                    role: role,
+                    account: account,
+                }))
+                (current (default-to { active: false } current-opt))
+                (is-active (get active current))
+                (count-opt (map-get? role-counts { role: role }))
+                (count-tuple (default-to { count: u0 } count-opt))
+                (count-val (get count count-tuple))
+                (new-count (if (> count-val u0)
+                    (- count-val u1)
+                    u0
+                ))
+            )
+            (if is-active
+                (begin
+                    (map-set role-membership {
+                        role: role,
+                        account: account,
+                    } { active: false }
+                    )
+                    (map-set role-counts { role: role } { count: new-count })
+                    (ok true)
+                )
+                (ok false)
+            )
+        )
+        (err u100)
+    )
+)
+
+(define-public (renounce-role (role (buff 32)))
+    (let (
+            (account tx-sender)
+            (current-opt (map-get? role-membership {
+                role: role,
+                account: account,
+            }))
+            (current (default-to { active: false } current-opt))
+            (is-active (get active current))
+            (count-opt (map-get? role-counts { role: role }))
+            (count-tuple (default-to { count: u0 } count-opt))
+            (count-val (get count count-tuple))
+            (new-count (if (> count-val u0)
+                (- count-val u1)
+                u0
+            ))
+        )
+        (if is-active
+            (begin
+                (map-set role-membership {
+                    role: role,
+                    account: account,
+                } { active: false }
+                )
+                (map-set role-counts { role: role } { count: new-count })
+                (ok true)
+            )
+            (ok false)
+        )
+    )
 )
 
 (define-read-only (is-allocation-open)
