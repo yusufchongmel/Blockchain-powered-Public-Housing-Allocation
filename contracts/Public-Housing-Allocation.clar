@@ -7,6 +7,9 @@
 (define-constant ERR_INSUFFICIENT_ELIGIBILITY (err u105))
 (define-constant ERR_ALREADY_ALLOCATED (err u106))
 (define-constant ERR_NOT_ELIGIBLE (err u107))
+(define-constant ERR_APPEAL_COOLDOWN (err u108))
+(define-constant ERR_ALREADY_APPEALED (err u109))
+(define-constant ERR_CANNOT_APPEAL (err u110))
 
 (define-data-var contract-owner principal tx-sender)
 (define-map role-membership
@@ -65,6 +68,18 @@
 )
 
 (define-data-var waitlist-length uint u0)
+
+(define-map application-appeals
+    uint
+    {
+        appeal-reason: (string-ascii 500),
+        appealed-at: uint,
+        appeal-status: (string-ascii 20),
+        reviewed-at: (optional uint),
+    }
+)
+
+(define-data-var appeal-cooldown-blocks uint u144)
 
 (define-map eligibility-criteria
     (string-ascii 50)
@@ -242,6 +257,30 @@
 
 (define-read-only (get-eligibility-criteria (criteria-name (string-ascii 50)))
     (map-get? eligibility-criteria criteria-name)
+)
+
+(define-read-only (get-appeal (app-id uint))
+    (map-get? application-appeals app-id)
+)
+
+(define-read-only (can-appeal (app-id uint))
+    (match (map-get? applications app-id)
+        app-data (let (
+                (is-rejected (is-eq (get status app-data) "rejected"))
+                (appeal-exists (is-some (map-get? application-appeals app-id)))
+                (cooldown (var-get appeal-cooldown-blocks))
+                (current-height stacks-block-height)
+                (applied-height (get applied-at app-data))
+                (blocks-passed (- current-height applied-height))
+            )
+            (and
+                is-rejected
+                (not appeal-exists)
+                (>= blocks-passed cooldown)
+            )
+        )
+        false
+    )
 )
 
 (define-read-only (calculate-priority-score
@@ -519,6 +558,87 @@
             ERR_NOT_FOUND
         )
         ERR_NOT_FOUND
+    )
+)
+
+(define-public (submit-appeal
+        (app-id uint)
+        (appeal-reason (string-ascii 500))
+    )
+    (let (
+            (app-data (unwrap! (map-get? applications app-id) ERR_NOT_FOUND))
+            (applicant (get applicant app-data))
+            (status (get status app-data))
+            (applied-at (get applied-at app-data))
+            (cooldown (var-get appeal-cooldown-blocks))
+            (current-height stacks-block-height)
+            (blocks-passed (- current-height applied-at))
+        )
+        (asserts! (is-eq tx-sender applicant) ERR_UNAUTHORIZED)
+        (asserts! (is-eq status "rejected") ERR_CANNOT_APPEAL)
+        (asserts! (>= blocks-passed cooldown) ERR_APPEAL_COOLDOWN)
+        (asserts! (is-none (map-get? application-appeals app-id))
+            ERR_ALREADY_APPEALED
+        )
+        (asserts! (> (len appeal-reason) u0) ERR_INVALID_INPUT)
+
+        (map-set application-appeals app-id {
+            appeal-reason: appeal-reason,
+            appealed-at: current-height,
+            appeal-status: "pending",
+            reviewed-at: none,
+        })
+        (ok true)
+    )
+)
+
+(define-public (review-appeal
+        (app-id uint)
+        (approved bool)
+    )
+    (let (
+            (app-data (unwrap! (map-get? applications app-id) ERR_NOT_FOUND))
+            (appeal-data (unwrap! (map-get? application-appeals app-id) ERR_NOT_FOUND))
+            (current-height stacks-block-height)
+        )
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (asserts! (is-eq (get appeal-status appeal-data) "pending")
+            ERR_INVALID_INPUT
+        )
+
+        (if approved
+            (begin
+                (map-set applications app-id
+                    (merge app-data { status: "pending" })
+                )
+                (add-to-waitlist app-id (get priority-score app-data))
+                (map-set application-appeals app-id
+                    (merge appeal-data {
+                        appeal-status: "approved",
+                        reviewed-at: (some current-height),
+                    })
+                )
+                (ok true)
+            )
+            (begin
+                (map-set application-appeals app-id
+                    (merge appeal-data {
+                        appeal-status: "denied",
+                        reviewed-at: (some current-height),
+                    })
+                )
+                (ok true)
+            )
+        )
+    )
+)
+
+(define-public (update-appeal-cooldown (blocks uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (asserts! (> blocks u0) ERR_INVALID_INPUT)
+        (var-set appeal-cooldown-blocks blocks)
+        (ok true)
     )
 )
 
